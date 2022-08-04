@@ -1,0 +1,10 @@
+matplotlib==3.4.2
+torch==1.11.0
+torchaudio==0.11.0
+torchvision==0.12.0
+seaborn==0.11.2
+tensorboard==2.6.0
+geotorch==0.2.0
+scikit-learn==1.0
+tqdm==4.62.3
+protobuf==3.20.1
