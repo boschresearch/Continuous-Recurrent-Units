@@ -345,13 +345,13 @@ class CRU(nn.Module):
                     print('--NAN after optimiser step in parameter ', name)
 
             # aggregate metrics and intermediates over entire epoch
-            epoch_ll += loss
+            epoch_ll += loss.item()
             epoch_rmse += rmse(truth, output_mean, mask_truth).item()
             epoch_mse += mse(truth, output_mean, mask_truth).item()
 
             if self.args.task == 'extrapolation' or self.args.task == 'interpolation':
-                epoch_imput_ll += imput_loss
-                epoch_imput_mse += imput_mse
+                epoch_imput_ll += imput_loss.item()
+                epoch_imput_mse += imput_mse.item()
                 imput_metrics = [epoch_imput_ll/(i+1), epoch_imput_mse/(i+1)]
             else:
                 imput_metrics = None
