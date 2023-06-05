@@ -206,12 +206,11 @@ def merge_dfs(input_dir, output_dir, keyword):
         with multiprocessing.Manager() as manager:
             lock = manager.Lock()
 
+            load_and_concatenate(input_files[0], output_file, True, lock)
+
             with futures.ProcessPoolExecutor(max_workers=2) as executor:
-                futures_ = list()
-                futures_.append(executor.submit(load_and_concatenate,
-                                                *[input_files[0], output_file, True, lock]))
-                futures_ += [executor.submit(load_and_concatenate, *[input_file, output_file, False, lock])
-                             for input_file in input_files[1:]]
+                futures_ = [executor.submit(load_and_concatenate, *[input_file, output_file, False, lock])
+                            for input_file in input_files[1:]]
 
                 done, not_done = futures.wait(futures_, return_when=futures.FIRST_EXCEPTION)
 
