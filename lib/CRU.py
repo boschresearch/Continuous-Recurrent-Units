@@ -32,7 +32,7 @@ from lib.decoder import SplitDiagGaussianDecoder, BernoulliDecoder
 from lib.CRULayer import CRULayer
 from lib.CRUCell import var_activation, var_activation_inverse
 from lib.losses import rmse, mse, GaussianNegLogLik, bernoulli_nll
-from lib.data_utils import  align_output_and_target, adjust_obs_for_extrapolation
+from lib.data_utils import align_output_and_target, adjust_obs_for_extrapolation
 
 optim = torch.optim
 nn = torch.nn
@@ -42,7 +42,8 @@ nn = torch.nn
 class CRU(nn.Module):
 
     # taken from https://github.com/ALRhub/rkn_share/ and modified
-    def __init__(self, target_dim: int, lsd: int, args, use_cuda_if_available: bool = True, bernoulli_output: bool = False):
+    def __init__(self, target_dim: int, lsd: int, args, use_cuda_if_available: bool = True,
+                 bernoulli_output: bool = False):
         """
         :param target_dim: output dimension
         :param lsd: latent state dimension
@@ -56,7 +57,7 @@ class CRU(nn.Module):
 
         self._lsd = lsd
         if self._lsd % 2 == 0:
-            self._lod = int(self._lsd / 2) 
+            self._lod = int(self._lsd / 2)
         else:
             raise Exception('Latent state dimension must be even number.')
         self.args = args
@@ -85,8 +86,9 @@ class CRU(nn.Module):
         else:
             SplitDiagGaussianDecoder._build_hidden_layers_mean = self._build_dec_hidden_layers_mean
             SplitDiagGaussianDecoder._build_hidden_layers_var = self._build_dec_hidden_layers_var
-            self._dec = TimeDistributed(SplitDiagGaussianDecoder(self._lod, out_dim=target_dim, dec_var_activation=args.dec_var_activation).to(
-                dtype=torch.float64), num_outputs=2).to(self._device)
+            self._dec = TimeDistributed(
+                SplitDiagGaussianDecoder(self._lod, out_dim=target_dim, dec_var_activation=args.dec_var_activation).to(
+                    dtype=torch.float64), num_outputs=2).to(self._device)
             self._enc = TimeDistributed(enc, num_outputs=2).to(self._device)
 
         # build (default) initial state
@@ -133,19 +135,22 @@ class CRU(nn.Module):
         :return: nn.ModuleList of hidden Layers, size of output of last layer
         """
         raise NotImplementedError
-    
+
     # taken from https://github.com/ALRhub/rkn_share/ and modified
-    def forward(self, obs_batch: torch.Tensor, time_points: torch.Tensor = None, obs_valid: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, obs_batch: torch.Tensor, time_points: torch.Tensor = None, obs_valid: torch.Tensor = None) -> \
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Single forward pass on a batch
         :param obs_batch: batch of observation sequences
         :param time_points: timestamps of observations
-        :param obs_valid: boolean if timestamp contains valid observation 
+        :param obs_valid: boolean if timestamp contains valid observation
         """
         y, y_var = self._enc(obs_batch)
         post_mean, post_cov, prior_mean, prior_cov, kalman_gain = self._cru_layer(y, y_var, self._initial_mean,
-                                                                                    [var_activation(self._log_icu), var_activation(
-                                                                                        self._log_icl), self._ics],
-                                                                                    obs_valid=obs_valid, time_points=time_points)
+                                                                                  [var_activation(self._log_icu),
+                                                                                   var_activation(self._log_icl),
+                                                                                   self._ics],
+                                                                                  obs_valid=obs_valid,
+                                                                                  time_points=time_points)
         # output an image
         if self.bernoulli_output:
             out_mean = self._dec(post_mean)
@@ -197,18 +202,19 @@ class CRU(nn.Module):
 
             if self.bernoulli_output:
                 loss = bernoulli_nll(truth, output_mean, uint8_targets=False)
-                mask_imput = (~obs_valid[...,None, None, None]) * mask_truth
-                imput_loss = np.nan #TODO: compute bernoulli loss on imputed points
-                imput_mse = mse(truth.flatten(start_dim=2), output_mean.flatten(start_dim=2), mask=mask_imput.flatten(start_dim=2))
+                mask_imput = (~obs_valid[..., None, None, None]) * mask_truth
+                imput_loss = np.nan  # TODO: compute bernoulli loss on imputed points
+                imput_mse = mse(truth.flatten(start_dim=2), output_mean.flatten(start_dim=2),
+                                mask=mask_imput.flatten(start_dim=2))
 
             else:
                 loss = GaussianNegLogLik(
                     output_mean, truth, output_var, mask=mask_truth)
                 # compute metric on imputed points only
-                mask_imput = (~obs_valid[...,None]) * mask_truth
+                mask_imput = (~obs_valid[..., None]) * mask_truth
                 imput_loss = GaussianNegLogLik(output_mean, truth, output_var, mask=mask_imput)
                 imput_mse = mse(truth, output_mean, mask=mask_imput)
-        
+
         return loss, output_mean, output_var, obs, truth, mask_obs, mask_truth, intermediates, imput_loss, imput_mse
 
     # new code component
@@ -231,7 +237,7 @@ class CRU(nn.Module):
 
             loss = GaussianNegLogLik(
                 output_mean, truth, output_var, mask=mask_truth)
-            
+
             # compute metric on imputed points only
             mask_imput = (~obs_valid[..., None]) * mask_truth
             imput_loss = GaussianNegLogLik(
@@ -255,7 +261,7 @@ class CRU(nn.Module):
             output_mean, output_var, intermediates = self.forward(
                 obs_batch=obs, time_points=obs_times, obs_valid=obs_valid)
             loss = GaussianNegLogLik(
-                output_mean, truth, output_var, mask=mask_truth)
+                output_mean[:, -1, :], truth, output_var[:, -1, :], mask=mask_truth)
 
         return loss, output_mean, output_var, obs, truth, mask_obs, mask_truth, intermediates
 
@@ -277,6 +283,35 @@ class CRU(nn.Module):
                 output_mean, output_var, truth, mask_truth)
             loss = GaussianNegLogLik(
                 output_mean, truth, output_var, mask=mask_truth)
+
+        return loss, output_mean, output_var, obs, truth, mask_obs, mask_truth, intermediates
+
+    def forecast(self, data, track_gradient=True):
+        """Computes loss on forecast task
+
+        :param data: batch of data
+        :param track_gradient: if to track gradient for backpropagation
+        :return: loss, input, intermediate variables and computed output
+        """
+        obs, truth, obs_times, obs_valid = [j.to(self._device) for j in data]
+        mask_truth = None
+        mask_obs = None
+        with torch.set_grad_enabled(track_gradient):
+            output_mean, output_var, intermediates = self.forward(obs_batch=obs,
+                                                                  time_points=obs_times, obs_valid=obs_valid)
+            # print("shapes:")
+            # print(f'obs: {obs.shape}')
+            # print(f'truth: {truth.shape}')
+            # print(f'obs_times: {obs_times.shape}')
+            # print(f'obs_valid: {obs_valid.shape}')
+            # print(f'output_mean: {output_mean.shape}')
+            # print(f'output_var: {output_var.shape}')
+            # print(f'intermediates: {len(intermediates)}', flush=True)
+            # TODO: verificare dimensione di truth uguale a output_mean e output_var
+            loss = GaussianNegLogLik(
+                output_mean[:, -1, -1][:, None, None], truth, output_var[:, -1, -1][:, None, None], mask=mask_truth)
+
+            # print(loss, flush=True)
 
         return loss, output_mean, output_var, obs, truth, mask_obs, mask_truth, intermediates
 
@@ -318,6 +353,10 @@ class CRU(nn.Module):
                 loss, output_mean, output_var, obs, truth, mask_obs, mask_truth, intermediates = self.one_step_ahead_prediction(
                     data)
 
+            elif self.args.task == 'forecast':
+                loss, output_mean, output_var, obs, truth, mask_obs, mask_truth, intermediates = self.forecast(
+                    data)
+
             else:
                 raise Exception('Unknown task')
 
@@ -352,7 +391,7 @@ class CRU(nn.Module):
             if self.args.task == 'extrapolation' or self.args.task == 'interpolation':
                 epoch_imput_ll += imput_loss
                 epoch_imput_mse += imput_mse
-                imput_metrics = [epoch_imput_ll/(i+1), epoch_imput_mse/(i+1)]
+                imput_metrics = [epoch_imput_ll / (i + 1), epoch_imput_mse / (i + 1)]
             else:
                 imput_metrics = None
 
@@ -367,7 +406,9 @@ class CRU(nn.Module):
             torch.save(intermediates_epoch, os.path.join(
                 self.args.save_intermediates, 'train_intermediates.pt'))
 
-        return epoch_ll/(i+1), epoch_rmse/(i+1), epoch_mse/(i+1), [output_mean, output_var], intermediates, [obs, truth, mask_obs], imput_metrics
+        return epoch_ll / (i + 1), epoch_rmse / (i + 1), epoch_mse / (i + 1), [output_mean,
+                                                                               output_var], intermediates, [obs, truth,
+                                                                                                            mask_obs], imput_metrics
 
     # new code component
     def eval_epoch(self, dl):
@@ -413,7 +454,7 @@ class CRU(nn.Module):
             if self.args.task == 'extrapolation' or self.args.task == 'interpolation':
                 epoch_imput_ll += imput_loss
                 epoch_imput_mse += imput_mse
-                imput_metrics = [epoch_imput_ll/(i+1), epoch_imput_mse/(i+1)]
+                imput_metrics = [epoch_imput_ll / (i + 1), epoch_imput_mse / (i + 1)]
             else:
                 imput_metrics = None
 
@@ -436,7 +477,9 @@ class CRU(nn.Module):
             torch.save(mask_obs_epoch, os.path.join(
                 self.args.save_intermediates, 'valid_mask_obs.pt'))
 
-        return epoch_ll/(i+1), epoch_rmse/(i+1), epoch_mse/(i+1), [output_mean, output_var], intermediates, [obs, truth, mask_obs], imput_metrics
+        return epoch_ll / (i + 1), epoch_rmse / (i + 1), epoch_mse / (i + 1), [output_mean,
+                                                                               output_var], intermediates, [obs, truth,
+                                                                                                            mask_obs], imput_metrics
 
     # new code component
     def train(self, train_dl, valid_dl, identifier, logger, epoch_start=0):
@@ -450,10 +493,13 @@ class CRU(nn.Module):
         """
 
         optimizer = optim.Adam(self.parameters(), self.args.lr)
-        def lr_update(epoch): return self.args.lr_decay ** epoch
+
+        def lr_update(epoch):
+            return self.args.lr_decay ** epoch
+
         scheduler = torch.optim.lr_scheduler.LambdaLR(
             optimizer, lr_lambda=lr_update)
-        
+
         make_dir(f'../results/tensorboard/{self.args.dataset}')
         writer = SummaryWriter(f'../results/tensorboard/{self.args.dataset}/{identifier}')
 
@@ -467,28 +513,28 @@ class CRU(nn.Module):
             end_training = datetime.now()
             if self.args.tensorboard:
                 log_to_tensorboard(self, writer=writer,
-                                mode='train',
-                                metrics=[train_ll, train_rmse, train_mse],
-                                output=train_output,
-                                input=train_input,
-                                intermediates=intermediates,
-                                epoch=epoch,
-                                imput_metrics=train_imput_metrics,
-                                log_rythm=self.args.log_rythm)
+                                   mode='train',
+                                   metrics=[train_ll, train_rmse, train_mse],
+                                   output=train_output,
+                                   input=train_input,
+                                   intermediates=intermediates,
+                                   epoch=epoch,
+                                   imput_metrics=train_imput_metrics,
+                                   log_rythm=self.args.log_rythm)
 
             # eval
             valid_ll, valid_rmse, valid_mse, valid_output, intermediates, valid_input, valid_imput_metrics = self.eval_epoch(
                 valid_dl)
             if self.args.tensorboard:
                 log_to_tensorboard(self, writer=writer,
-                                mode='valid',
-                                metrics=[valid_ll, valid_rmse, valid_mse],
-                                output=valid_output,
-                                input=valid_input,
-                                intermediates=intermediates,
-                                epoch=epoch,
-                                imput_metrics=valid_imput_metrics,
-                                log_rythm=self.args.log_rythm)
+                                   mode='valid',
+                                   metrics=[valid_ll, valid_rmse, valid_mse],
+                                   output=valid_output,
+                                   input=valid_input,
+                                   intermediates=intermediates,
+                                   epoch=epoch,
+                                   imput_metrics=valid_imput_metrics,
+                                   log_rythm=self.args.log_rythm)
 
             end = datetime.now()
             logger.info(f'Training epoch {epoch} took: {(end_training - start).total_seconds()}')
@@ -500,11 +546,13 @@ class CRU(nn.Module):
                     logger.info(f' train_mse_imput: {train_imput_metrics[1]:3f}')
                     logger.info(f' valid_mse_imput: {valid_imput_metrics[1]:3f}')
                 else:
-                    logger.info(f' train_nll_imput: {train_imput_metrics[0]:3f}, train_mse_imput: {train_imput_metrics[1]:3f}')
-                    logger.info(f' valid_nll_imput: {valid_imput_metrics[0]:3f}, valid_mse_imput: {valid_imput_metrics[1]:3f}')
+                    logger.info(
+                        f' train_nll_imput: {train_imput_metrics[0]:3f}, train_mse_imput: {train_imput_metrics[1]:3f}')
+                    logger.info(
+                        f' valid_nll_imput: {valid_imput_metrics[0]:3f}, valid_mse_imput: {valid_imput_metrics[1]:3f}')
 
             scheduler.step()
-        
+
         make_dir(f'../results/models/{self.args.dataset}')
         torch.save({'epoch': epoch,
                     'model_state_dict': self.state_dict(),

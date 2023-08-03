@@ -19,6 +19,8 @@
 # cf. 3rd-party-licenses.txt file in the root directory of this source tree.
 
 import multiprocessing
+import platform
+
 import pandas as pd
 from itertools import chain
 import numpy as np
@@ -83,24 +85,68 @@ def download_ushcn(data_path):
         'state48_WY.txt.gz'
     ]
     urls = [(url + state_file, state_file) for state_file in daily_state_files]
-    with futures.ProcessPoolExecutor() as executor:
-        futures_ = [executor.submit(download_url, *[url, data_path],
-                                    **{'filename': filename, 'md5': None}) for url, filename in urls]
-        done, not_done = futures.wait(futures_, return_when=futures.ALL_COMPLETED)
+    # using the 'spawn' context with ProcessPoolExecutor on Windows causes pickling errors,
+    # but it is the only available method. It is necessary to make the code sequential, as threads are
+    # bound by the GIL and execute sequentially anyway.
+    if platform.system() == 'Windows':
+        for url, state_file in urls:
+            download_url(url, data_path, filename=state_file)
 
-        futures_exceptions = [future.exception() for future in done]
-        failed_futures = sum(map(lambda exception_: True if exception_ is not None else False, futures_exceptions))
+    else:  # Linux uses 'fork' as starting method, and it doesn't give any problem.
+        with futures.ProcessPoolExecutor() as executor:
+            futures_ = [executor.submit(download_url, *[url, data_path],
+                                        **{'filename': filename, 'md5': None}) for url, filename in urls]
+            done, not_done = futures.wait(futures_, return_when=futures.ALL_COMPLETED)
 
-        if failed_futures > 0:
-            print("Could not download all files. Thrown exceptions: ")
+            futures_exceptions = [future.exception() for future in done]
+            failed_futures = sum(map(lambda exception_: True if exception_ is not None else False, futures_exceptions))
 
-            for exception in futures_exceptions:
-                print(exception)
+            if failed_futures > 0:
+                print("Could not download all files. Thrown exceptions: ")
 
-            raise RuntimeError(f"Could not download {failed_futures} files.")
+                for exception in futures_exceptions:
+                    print(exception)
 
-        if failed_futures == 0:
-            print("All files downloaded.")
+                raise RuntimeError(f"Could not download {failed_futures} files.")
+
+            if failed_futures == 0:
+                print("All files downloaded.")
+
+
+def download_stations_spatial_data(data_path):
+    import urllib.request
+    filename = 'ushcn-v2.5-stations.txt'
+    url = 'ftp://ftp.ncdc.noaa.gov:21/pub/data/ushcn/v2.5/' + filename
+    urllib.request.urlretrieve(url, os.path.join(data_path, filename))
+    print("Stations spatial data downloaded.")
+
+
+def parse_stations_spatial_data(input_dir, output_dir):
+    stations_file = os.path.join(input_dir, 'ushcn-v2.5-stations.txt')
+    stations_data_df = pd.DataFrame(columns=['COOP_ID', 'ELEMENT', 'VALUE'])
+    with open(stations_file, 'r') as file:
+        for line in file:
+            data_dict = dict()
+            data_dict['COOP_ID'] = [line[5:11]]
+            spatial_data_dict = {
+                'LATITUDE': [float(line[12:20])],
+                'LONGITUDE': [float(line[21:30])],
+                'ELEVATION': float(line[32:37])
+            }
+
+            elevation = spatial_data_dict['ELEVATION']
+            if elevation == -999.9:
+                spatial_data_dict['ELEVATION'] = [np.nan]
+            else:
+                spatial_data_dict['ELEVATION'] = [elevation]
+
+            for element, value in spatial_data_dict.items():
+                data_dict['ELEMENT'] = element
+                data_dict['VALUE'] = value
+                stations_data_df = pd.concat([stations_data_df, pd.DataFrame.from_dict(data_dict)], ignore_index=True)
+
+    stations_data_df.to_csv(os.path.join(output_dir, 'ushcn-v2.5-stations.csv'), index=False)
+    print("Stations spatial data parsed.")
 
 
 # taken from https://github.com/edebrouwer/gru_ode_bayes and modified
@@ -206,29 +252,28 @@ def merge_dfs(input_dir, output_dir, keyword):
         with multiprocessing.Manager() as manager:
             lock = manager.Lock()
 
+            load_and_concatenate(input_files[0], output_file, True, lock)
+
             with futures.ProcessPoolExecutor(max_workers=2) as executor:
-                futures_ = list()
-                futures_.append(executor.submit(load_and_concatenate,
-                                                *[input_files[0], output_file, True, lock]))
-                futures_ += [executor.submit(load_and_concatenate, *[input_file, output_file, False, lock])
-                             for input_file in input_files[1:]]
+                futures_ = [executor.submit(load_and_concatenate, *[input_file, output_file, False, lock])
+                            for input_file in input_files[1:]]
 
-                done, not_done = futures.wait(futures_, return_when=futures.FIRST_EXCEPTION)
+            done, not_done = futures.wait(futures_, return_when=futures.FIRST_EXCEPTION)
 
-                futures_exceptions = [future.exception() for future in done]
-                failed_futures = sum(
-                    map(lambda exception_: True if exception_ is not None else False, futures_exceptions))
+            futures_exceptions = [future.exception() for future in done]
+            failed_futures = sum(
+                map(lambda exception_: True if exception_ is not None else False, futures_exceptions))
 
-                if failed_futures > 0:
-                    print("Could not join a CSV file. Thrown exception: ")
+            if failed_futures > 0:
+                print("Could not join a CSV file. Thrown exception: ")
 
-                    for exception in futures_exceptions:
-                        print(exception)
+                for exception in futures_exceptions:
+                    print(exception)
 
-                    raise RuntimeError(f"Could not join a file in daily_merged.csv.")
+                raise RuntimeError(f"Could not join a file in daily_merged.csv.")
 
-                if failed_futures == 0:
-                    print("All files saved in one dataframe as daily_merged.csv.")
+            if failed_futures == 0:
+                print("All files saved in one dataframe as daily_merged.csv.")
 
 
 # taken from https://github.com/edebrouwer/gru_ode_bayes and modified
@@ -276,6 +321,7 @@ def clean(input_dir, output_dir):
         df.insert(0, "UNIQUE_ID", df.COOP_ID.map(unique_map))
         df.insert(1, "LABEL", df.ELEMENT.map(label_map))
 
+        print(df[['LABEL', 'ELEMENT']].sort_values(by='LABEL').drop_duplicates())
         # Create a time_index.
         import datetime
         df["DATE"] = pd.to_datetime(
@@ -299,6 +345,12 @@ def train_test_valid_split(input_dir, output_dir, test=0.2, valid=0.2, seed=42):
     rng2 = np.random.default_rng(seed + 1)
     df = pd.read_csv(os.path.join(input_dir, 'cleaned_df.csv'))
     idx = df.UNIQUE_ID.unique()
+    stations_data_file = os.path.join(input_dir, "ushcn-v2.5-stations.csv")
+    columns_to_convert = ['UNIQUE_ID', 'LABEL', 'YEAR', 'MONTH', 'DAY', 'DAYS_FROM_1950', 'TIME_STAMP']
+    label_map = dict(zip(list(df.ELEMENT.unique()),
+                         np.arange(df.ELEMENT.nunique())))
+    unique_map = dict(zip(list(df.COOP_ID.unique()),
+                          np.arange(df.COOP_ID.nunique())))
 
     test_idx = rng1.choice(idx, int(len(idx) * test), replace=False)
     train_valid_idx = [i for i in idx if i not in test_idx]
@@ -314,11 +366,23 @@ def train_test_valid_split(input_dir, output_dir, test=0.2, valid=0.2, seed=42):
         f'valid: {valid_set.UNIQUE_ID.nunique()} \n'
         f'train: {train_set.UNIQUE_ID.nunique()}')
 
-    test_set.to_csv(os.path.join(output_dir, 'cleaned_test.csv'))
-    train_valid_set.to_csv(os.path.join(
-        output_dir, 'cleaned_train_valid.csv'))
-    valid_set.to_csv(os.path.join(output_dir, 'cleaned_valid.csv'))
-    train_set.to_csv(os.path.join(output_dir, 'cleaned_train.csv'))
+    # Add spatial information
+    spatial_data_df = pd.read_csv(stations_data_file, low_memory=False)
+
+    for set_df in [test_set, train_valid_set, valid_set, train_set]:
+        set_spatial_data_df = spatial_data_df[spatial_data_df.COOP_ID.isin(set_df.COOP_ID.unique())]
+        set_df = pd.concat([set_df, set_spatial_data_df])
+        set_df['LABEL'] = set_df['ELEMENT'].map(label_map)
+        set_df['UNIQUE_ID'] = set_df['COOP_ID'].map(unique_map)
+        set_df.sort_values(by=['UNIQUE_ID', 'YEAR'], na_position='first', ignore_index=True, inplace=True)
+        set_df.bfill(inplace=True)
+        set_df[columns_to_convert] = set_df[columns_to_convert].astype(int)
+        set_df.drop_duplicates(inplace=True)
+
+    test_set.to_csv(os.path.join(output_dir, 'cleaned_test.csv'), index=False)
+    train_valid_set.to_csv(os.path.join(output_dir, 'cleaned_train_valid.csv'), index=False)
+    valid_set.to_csv(os.path.join(output_dir, 'cleaned_valid.csv'), index=False)
+    train_set.to_csv(os.path.join(output_dir, 'cleaned_train.csv'), index=False)
 
 
 # new code component
@@ -369,9 +433,29 @@ def cleaning_after_split(input_dir, name, output_dir, outlier_thr=4, scaling='st
         else:
             raise Exception('Scaling method unknown')
 
+    # add spatial data (vi prego basta)
+    stations_data_file = os.path.join(input_dir, "ushcn-v2.5-stations.csv")
+    spatial_data_df = pd.read_csv(stations_data_file, low_memory=False)
+    columns_to_convert = ['UNIQUE_ID', 'LABEL', 'YEAR', 'TIME_STAMP']
+
+    set_spatial_data_df = spatial_data_df[spatial_data_df.COOP_ID.isin(df.COOP_ID.unique())]
+    set_df = pd.concat([df, set_spatial_data_df])
+    label_map = dict(zip(list(set_df.ELEMENT.unique()),
+                         np.arange(set_df.ELEMENT.nunique())))
+    unique_map = dict(zip(list(set_df.COOP_ID.unique()),
+                          np.arange(set_df.COOP_ID.nunique())))
+    set_df['LABEL'] = set_df['ELEMENT'].map(label_map)
+    set_df['UNIQUE_ID'] = set_df['COOP_ID'].map(unique_map)
+    set_df.sort_values(by=['UNIQUE_ID', 'YEAR'], na_position='first', ignore_index=True, inplace=True)
+    set_df.bfill(inplace=True)
+    set_df[columns_to_convert] = set_df[columns_to_convert].astype(int)
+    df = set_df.drop_duplicates()
+
     # adjust data format to pivot table
     pivot = df.pivot(index=['COOP_ID', 'TIME_STAMP'],
                      columns='LABEL', values='VALUE').reset_index()
+    # fill spatial data for each center
+    pivot[[5, 6, 7]] = pivot[[5, 6, 7]].ffill()
     pivot = pivot.sort_values(['COOP_ID', 'TIME_STAMP'])
 
     # drop centers that have too little observations (just a handfull)
@@ -413,6 +497,10 @@ def download_and_process_ushcn(file_path):
 
     # reads the individual state .csv files and merges it to a single file named "daily_merged.csv"
     merge_dfs(input_dir=raw_path, output_dir=processed_path, keyword='state')
+
+    download_stations_spatial_data(raw_path)
+
+    parse_stations_spatial_data(raw_path, processed_path)
 
     # cleans daily_merged.csv
     clean(input_dir=processed_path, output_dir=processed_path)
