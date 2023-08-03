@@ -447,6 +447,10 @@ class CRU(nn.Module):
                 loss, output_mean, output_var, obs, truth, mask_obs, mask_truth, intermediates = self.one_step_ahead_prediction(
                     data, track_gradient=False)
 
+            elif self.args.task == 'forecast':
+                loss, output_mean, output_var, obs, truth, mask_obs, mask_truth, intermediates = self.forecast(
+                    data, track_gradient=False)
+
             epoch_ll += loss
             epoch_rmse += rmse(truth, output_mean, mask_truth).item()
             epoch_mse += mse(truth, output_mean, mask_truth).item()
