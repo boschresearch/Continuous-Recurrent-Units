@@ -21,35 +21,195 @@
 from lib.CRU import CRU
 from lib.utils import MyLayerNorm2d
 import torch
+
 nn = torch.nn
 
 
 # new code component
 def load_model(args):
-    
-    # Pendulum 
+    # Pendulum
     if args.dataset == 'pendulum':
-        if args.task =='regression':
-            model = Pendulum_reg(target_dim=2, lsd=args.latent_state_dim, args=args, 
-                layer_norm=False, use_cuda_if_available=True)
+        if args.task == 'regression':
+            model = Pendulum_reg(target_dim=2, lsd=args.latent_state_dim, args=args,
+                                 layer_norm=False, use_cuda_if_available=True)
         elif args.task == 'interpolation':
-            model = Pendulum(target_dim=(1, 24, 24), lsd=args.latent_state_dim, args=args, 
-                layer_norm=True, use_cuda_if_available=True, bernoulli_output=True)
+            model = Pendulum(target_dim=(1, 24, 24), lsd=args.latent_state_dim, args=args,
+                             layer_norm=True, use_cuda_if_available=True, bernoulli_output=True)
         else:
             raise Exception('Task not available for Pendulum data')
-        
+
+    # FOR FDB: target_dim must be the same as the number of features
+
     # USHCN
     elif args.dataset == 'ushcn':
         model = Physionet_USHCN(target_dim=5, lsd=args.latent_state_dim, args=args,
-                use_cuda_if_available=True)
+                                use_cuda_if_available=True)
+
+    elif args.dataset == 'ushcn_forecast':
+        model = USHCNForecast(target_dim=5, lsd=args.latent_state_dim, args=args,
+                              use_cuda_if_available=True)
 
     # Physionet
     elif args.dataset == 'physionet':
         model = Physionet_USHCN(target_dim=37, lsd=args.latent_state_dim, args=args,
-                use_cuda_if_available=True)
+                                use_cuda_if_available=True)
+
+    # FrenchPiezo
+    elif args.dataset == 'frenchpiezo':
+        model = FrenchPiezoForecast(target_dim=3, lsd=args.latent_state_dim, args=args,
+                                    use_cuda_if_available=True)
+
+    # FDB
+    elif args.dataset == 'fdb':
+        model = FDB(target_dim=1, lsd=args.latent_state_dim, args=args, use_cuda_if_available=True)
+
+    else:
+        model = None
 
     return model
 
+
+class USHCNForecast(CRU):
+
+    def __init__(self, target_dim: int, lsd: int, args, use_cuda_if_available: bool = True):
+        self.hidden_units = args.hidden_units
+        self.target_dim = target_dim
+
+        super(USHCNForecast, self).__init__(target_dim, lsd, args, use_cuda_if_available)
+
+    def _build_enc_hidden_layers(self):
+        layers = []
+        layers.append(nn.Linear(self.target_dim, self.hidden_units))
+        layers.append(nn.ReLU())
+        layers.append(nn.LayerNorm(self.hidden_units))
+
+        layers.append(nn.Linear(self.hidden_units, self.hidden_units))
+        layers.append(nn.ReLU())
+        layers.append(nn.LayerNorm(self.hidden_units))
+
+        layers.append(nn.Linear(self.hidden_units, self.hidden_units))
+        layers.append(nn.ReLU())
+        layers.append(nn.LayerNorm(self.hidden_units))
+        # size last hidden
+        return nn.ModuleList(layers).to(dtype=torch.float64), self.hidden_units
+
+    def _build_dec_hidden_layers_mean(self):
+        return nn.ModuleList([
+            nn.Linear(in_features=2 * self._lod, out_features=self.hidden_units),
+            nn.ReLU(),
+            nn.LayerNorm(self.hidden_units),
+
+            nn.Linear(in_features=self.hidden_units, out_features=self.hidden_units),
+            nn.ReLU(),
+            nn.LayerNorm(self.hidden_units),
+
+            nn.Linear(in_features=self.hidden_units, out_features=self.hidden_units),
+            nn.ReLU(),
+            nn.LayerNorm(self.hidden_units)
+        ]).to(dtype=torch.float64), self.hidden_units
+
+    def _build_dec_hidden_layers_var(self):
+        return nn.ModuleList([
+            nn.Linear(in_features=3 * self._lod, out_features=self.hidden_units),
+            nn.ReLU(),
+            nn.LayerNorm(self.hidden_units)
+        ]).to(dtype=torch.float64), self.hidden_units
+
+
+class FrenchPiezoForecast(CRU):
+
+    def __init__(self, target_dim: int, lsd: int, args,
+                 use_cuda_if_available: bool = True):
+        self.hidden_units = args.hidden_units
+        self.target_dim = target_dim
+
+        super(FrenchPiezoForecast, self).__init__(target_dim, lsd, args, use_cuda_if_available)
+
+    def _build_enc_hidden_layers(self):
+        layers = []
+        layers.append(nn.Linear(self.target_dim, self.hidden_units))
+        layers.append(nn.ReLU())
+        layers.append(nn.LayerNorm(self.hidden_units))
+
+        layers.append(nn.Linear(self.hidden_units, self.hidden_units))
+        layers.append(nn.ReLU())
+        layers.append(nn.LayerNorm(self.hidden_units))
+
+        layers.append(nn.Linear(self.hidden_units, self.hidden_units))
+        layers.append(nn.ReLU())
+        layers.append(nn.LayerNorm(self.hidden_units))
+        # size last hidden
+        return nn.ModuleList(layers).to(dtype=torch.float64), self.hidden_units
+
+    def _build_dec_hidden_layers_mean(self):
+        return nn.ModuleList([
+            nn.Linear(in_features=2 * self._lod, out_features=self.hidden_units),
+            nn.ReLU(),
+            nn.LayerNorm(self.hidden_units),
+
+            nn.Linear(in_features=self.hidden_units, out_features=self.hidden_units),
+            nn.ReLU(),
+            nn.LayerNorm(self.hidden_units),
+
+            nn.Linear(in_features=self.hidden_units, out_features=self.hidden_units),
+            nn.ReLU(),
+            nn.LayerNorm(self.hidden_units)
+        ]).to(dtype=torch.float64), self.hidden_units
+
+    def _build_dec_hidden_layers_var(self):
+        return nn.ModuleList([
+            nn.Linear(in_features=3 * self._lod, out_features=self.hidden_units),
+            nn.ReLU(),
+            nn.LayerNorm(self.hidden_units)
+        ]).to(dtype=torch.float64), self.hidden_units
+
+
+class FDB(CRU):
+
+    def __init__(self, target_dim: int, lsd: int, args,
+                 use_cuda_if_available: bool = True):
+        self.hidden_units = args.hidden_units
+        self.target_dim = target_dim
+
+        super(FDB, self).__init__(target_dim, lsd, args, use_cuda_if_available)
+
+    def _build_enc_hidden_layers(self):
+        layers = []
+        layers.append(nn.Linear(self.target_dim, self.hidden_units))
+        layers.append(nn.ReLU())
+        layers.append(nn.LayerNorm(self.hidden_units))
+
+        layers.append(nn.Linear(self.hidden_units, self.hidden_units))
+        layers.append(nn.ReLU())
+        layers.append(nn.LayerNorm(self.hidden_units))
+
+        layers.append(nn.Linear(self.hidden_units, self.hidden_units))
+        layers.append(nn.ReLU())
+        layers.append(nn.LayerNorm(self.hidden_units))
+        # size last hidden
+        return nn.ModuleList(layers).to(dtype=torch.float64), self.hidden_units
+
+    def _build_dec_hidden_layers_mean(self):
+        return nn.ModuleList([
+            nn.Linear(in_features=2 * self._lod, out_features=self.hidden_units),
+            nn.ReLU(),
+            nn.LayerNorm(self.hidden_units),
+
+            nn.Linear(in_features=self.hidden_units, out_features=self.hidden_units),
+            nn.ReLU(),
+            nn.LayerNorm(self.hidden_units),
+
+            nn.Linear(in_features=self.hidden_units, out_features=self.hidden_units),
+            nn.ReLU(),
+            nn.LayerNorm(self.hidden_units)
+        ]).to(dtype=torch.float64), self.hidden_units
+
+    def _build_dec_hidden_layers_var(self):
+        return nn.ModuleList([
+            nn.Linear(in_features=3 * self._lod, out_features=self.hidden_units),
+            nn.ReLU(),
+            nn.LayerNorm(self.hidden_units)
+        ]).to(dtype=torch.float64), self.hidden_units
 
 # new code component
 class Physionet_USHCN(CRU):
@@ -60,8 +220,7 @@ class Physionet_USHCN(CRU):
         self.target_dim = target_dim
 
         super(Physionet_USHCN, self).__init__(target_dim, lsd,
-                                             args, use_cuda_if_available)
-
+                                              args, use_cuda_if_available)
 
     def _build_enc_hidden_layers(self):
         layers = []
@@ -162,7 +321,7 @@ class Pendulum_reg(CRU):
         layers = []
         # hidden layer 1
         layers.append(nn.Conv2d(in_channels=1, out_channels=12,
-                      kernel_size=5, padding=2))
+                                kernel_size=5, padding=2))
         if self._layer_norm:
             layers.append(MyLayerNorm2d(channels=12))
         layers.append(nn.ReLU())
@@ -170,7 +329,7 @@ class Pendulum_reg(CRU):
 
         # hidden layer 2
         layers.append(nn.Conv2d(in_channels=12, out_channels=12,
-                      kernel_size=3, stride=2, padding=1))
+                                kernel_size=3, stride=2, padding=1))
         if self._layer_norm:
             layers.append(MyLayerNorm2d(channels=12))
         layers.append(nn.ReLU())
@@ -193,7 +352,3 @@ class Pendulum_reg(CRU):
             nn.Linear(in_features=3 * self._lod, out_features=30),
             nn.Tanh()
         ]), 30
-
-
-
-

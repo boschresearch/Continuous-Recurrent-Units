@@ -12,6 +12,8 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
+import multiprocessing
+from concurrent import futures
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -19,53 +21,79 @@ from torch.nn.utils.rnn import pad_sequence
 import numpy as np
 import pandas as pd
 import os
+
+from lib.frenchpiezo_preprocessing import download_and_process_frenchpiezo
 from lib.physionet_preprocessing import download_and_process_physionet
 from lib.ushcn_preprocessing import download_and_process_ushcn
 from lib.pendulum_generation import generate_pendulums
+from lib.fdb_preparation import prepare_fdb
 
 
 # new code component 
 def load_data(args):
     file_path = f'data/{args.dataset}/'
-    
+
     # Pendulum 
     if args.dataset == 'pendulum':
-        
+
         if args.task == 'interpolation':
             if not os.path.exists(os.path.join(file_path, f'pend_interpolation_ir{args.impute_rate}.npz')):
                 print(f'Generating pendulum trajectories and saving to {file_path} ...')
                 generate_pendulums(file_path, task=args.task, impute_rate=args.impute_rate)
 
-            train = Pendulum_interpolation(file_path=file_path, name=f'pend_interpolation_ir{args.impute_rate}.npz', 
-                    mode='train', sample_rate=args.sample_rate, random_state=args.data_random_seed)
-            valid = Pendulum_interpolation(file_path=file_path, name=f'pend_interpolation_ir{args.impute_rate}.npz', 
-                    mode='valid', sample_rate=args.sample_rate, random_state=args.data_random_seed)
-        
-        elif args.task =='regression':
+            train = Pendulum_interpolation(file_path=file_path, name=f'pend_interpolation_ir{args.impute_rate}.npz',
+                                           mode='train', sample_rate=args.sample_rate,
+                                           random_state=args.data_random_seed)
+            valid = Pendulum_interpolation(file_path=file_path, name=f'pend_interpolation_ir{args.impute_rate}.npz',
+                                           mode='valid', sample_rate=args.sample_rate,
+                                           random_state=args.data_random_seed)
+
+        elif args.task == 'regression':
             if not os.path.exists(os.path.join(file_path, 'pend_regression.npz')):
                 print(f'Generating pendulum trajectories and saving to {file_path} ...')
                 generate_pendulums(file_path, task=args.task)
 
             train = Pendulum_regression(file_path=file_path, name='pend_regression.npz',
-                               mode='train', sample_rate=args.sample_rate, random_state=args.data_random_seed)
+                                        mode='train', sample_rate=args.sample_rate, random_state=args.data_random_seed)
             valid = Pendulum_regression(file_path=file_path, name='pend_regression.npz',
-                               mode='valid', sample_rate=args.sample_rate, random_state=args.data_random_seed)
+                                        mode='valid', sample_rate=args.sample_rate, random_state=args.data_random_seed)
         else:
             raise Exception('Task not available for Pendulum data')
         collate_fn = None
-        
+
     # USHCN
     elif args.dataset == 'ushcn':
         if not os.path.exists(os.path.join(file_path, 'pivot_train_valid_1990_1993_thr4_normalize.csv')):
             print(f'Downloading USHCN data and saving to {file_path} ...')
             download_and_process_ushcn(file_path)
 
-        train = USHCN(file_path=file_path, name='pivot_train_valid_1990_1993_thr4_normalize.csv', unobserved_rate=args.unobserved_rate,
-                     impute_rate=args.impute_rate, sample_rate=args.sample_rate)
-        valid = USHCN(file_path=file_path, name='pivot_test_1990_1993_thr4_normalize.csv', unobserved_rate=args.unobserved_rate,
-                     impute_rate=args.impute_rate, sample_rate=args.sample_rate)
+
+        if args.task in ('interpolation', 'extrapolation'):
+            train = USHCN(file_path=file_path, name='pivot_train_valid_1990_1993_thr4_normalize.csv',
+                          unobserved_rate=args.unobserved_rate,
+                          impute_rate=args.impute_rate, sample_rate=args.sample_rate)
+            valid = USHCN(file_path=file_path, name='pivot_test_1990_1993_thr4_normalize.csv',
+                          unobserved_rate=args.unobserved_rate,
+                          impute_rate=args.impute_rate, sample_rate=args.sample_rate)
+
         collate_fn = None
-    
+
+    elif args.dataset == 'ushcn_forecast':
+        if not os.path.exists(os.path.join(file_path, 'pivot_train_valid_1990_1993_thr4_normalize.csv')):
+            print(f'Downloading USHCN data and saving to {file_path} ...')
+            download_and_process_ushcn(file_path)
+
+        train = USHCNForecast(file_path=file_path, name='pivot_train_valid_1990_1993_thr4_normalize.csv',
+                              unobserved_rate=args.unobserved_rate,
+                              impute_rate=args.impute_rate, sample_rate=args.sample_rate, num_past=args.num_past,
+                              num_future=args.num_future)
+        valid = USHCNForecast(file_path=file_path, name='pivot_test_1990_1993_thr4_normalize.csv',
+                              unobserved_rate=args.unobserved_rate,
+                              impute_rate=args.impute_rate, sample_rate=args.sample_rate, num_past=args.num_past,
+                              num_future=args.num_future)
+
+        collate_fn = None
+
     # Physionet
     elif args.dataset == 'physionet':
         if not os.path.exists(os.path.join(file_path, 'norm_train_valid.pt')):
@@ -75,9 +103,37 @@ def load_data(args):
         train = Physionet(file_path=file_path, name='norm_train_valid.pt')
         valid = Physionet(file_path=file_path, name='norm_test.pt')
         collate_fn = collate_fn_physionet
-    
-    train_dl = DataLoader(train, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn, num_workers=args.num_workers, pin_memory=args.pin_memory)
-    valid_dl = DataLoader(valid, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn, num_workers=args.num_workers, pin_memory=args.pin_memory)
+
+    # FrenchPiezo
+    elif args.dataset == 'frenchpiezo':
+        if not os.path.exists(os.path.join(file_path, 'cleaned_train.csv')):
+            print(f"Downloading FrenchPiezo dataset and saving to {file_path} ...")
+            download_and_process_frenchpiezo(file_path)
+
+        train = FrenchPiezo(file_path=file_path, name='cleaned_train_valid.csv',
+                            unobserved_rate=args.unobserved_rate,
+                            impute_rate=args.impute_rate, sample_rate=args.sample_rate, num_past=args.num_past,
+                            num_future=args.num_future)
+        valid = FrenchPiezo(file_path=file_path, name='cleaned_test.csv',
+                            unobserved_rate=args.unobserved_rate,
+                            impute_rate=args.impute_rate, sample_rate=args.sample_rate, num_past=args.num_past,
+                            num_future=args.num_future)
+        collate_fn = None
+
+    elif args.dataset == 'fdb':
+        if not os.path.exists(os.path.join(file_path, 'processed', 'x_train.csv')):
+            print("Preparing FDB dataset...")
+            prepare_fdb(file_path, args.timestamp_freq)
+
+        train = FDB(file_path=file_path, mode='train', sample_rate=args.sample_rate)
+        valid = FDB(file_path=file_path, mode='valid', sample_rate=args.sample_rate)
+
+        collate_fn = None
+
+    train_dl = DataLoader(train, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn,
+                          num_workers=args.num_workers, pin_memory=args.pin_memory)
+    valid_dl = DataLoader(valid, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn,
+                          num_workers=args.num_workers, pin_memory=args.pin_memory)
 
     return train_dl, valid_dl
 
@@ -89,7 +145,7 @@ class Pendulum_interpolation(Dataset):
         data = dict(np.load(os.path.join(file_path, name)))
         train_obs, train_targets, train_time_points, train_obs_valid, \
             test_obs, test_targets, test_time_points, test_obs_valid = subsample(
-                data, sample_rate=sample_rate, imagepred=True, random_state=random_state)
+            data, sample_rate=sample_rate, imagepred=True, random_state=random_state)
 
         if mode == 'train':
             self.obs = train_obs
@@ -104,9 +160,9 @@ class Pendulum_interpolation(Dataset):
             self.time_points = test_time_points
 
         self.obs = np.ascontiguousarray(
-            np.transpose(self.obs, [0, 1, 4, 2, 3]))/255.0
+            np.transpose(self.obs, [0, 1, 4, 2, 3])) / 255.0
         self.targets = np.ascontiguousarray(
-            np.transpose(self.targets, [0, 1, 4, 2, 3]))/255.0
+            np.transpose(self.targets, [0, 1, 4, 2, 3])) / 255.0
         self.obs_valid = np.squeeze(self.obs_valid, axis=2)
 
     def __len__(self):
@@ -128,7 +184,7 @@ class Pendulum_regression(Dataset):
         data = dict(np.load(os.path.join(file_path, name)))
         train_obs, train_targets, test_obs, test_targets, train_time_points, \
             test_time_points = subsample(
-                data, sample_rate=sample_rate, random_state=random_state)
+            data, sample_rate=sample_rate, random_state=random_state)
 
         if mode == 'train':
             self.obs = train_obs
@@ -140,7 +196,7 @@ class Pendulum_regression(Dataset):
             self.time_points = test_time_points
 
         self.obs = np.ascontiguousarray(
-            np.transpose(self.obs, [0, 1, 4, 2, 3]))/255.0
+            np.transpose(self.obs, [0, 1, 4, 2, 3])) / 255.0
 
     def __len__(self):
         return self.obs.shape[0]
@@ -153,12 +209,281 @@ class Pendulum_regression(Dataset):
         return obs, targets, time_points, obs_valid
 
 
-# new code component 
-class USHCN(Dataset):
+class FDB(Dataset):
+    def __init__(self, file_path, mode, impute_rate=None, sample_rate=0.5,
+                 columns=range(0, 48), unobserved_rate=None):
+        file_path = os.path.join(file_path, 'processed')
+        self.params = list(columns)
+        self.sample_rate = sample_rate
+        self.impute_rate = impute_rate
+        self.unobserved_rate = unobserved_rate
+        if mode == 'train':
+            self.x = pd.read_csv(os.path.join(file_path, 'x_train.csv'), low_memory=False)
+            self.y = pd.read_csv(os.path.join(file_path, 'y_train.csv'), low_memory=False)
+            self.time = pd.read_csv(os.path.join(file_path, 'time_train.csv'), low_memory=False)
+        elif mode == 'valid':
+            self.x = pd.read_csv(os.path.join(file_path, 'x_test.csv'), low_memory=False)
+            self.y = pd.read_csv(os.path.join(file_path, 'y_test.csv'), low_memory=False)
+            self.time = pd.read_csv(os.path.join(file_path, 'time_test.csv'), low_memory=False)
 
+        self.label_columns = self.x.columns[self.x.columns.isin([str(i) for i in self.params])]
+        self.num_features = 1
+        self.set_ = mode
+
+    def __len__(self):
+        return self.x.shape[0]
+
+    def __getitem__(self, idx):
+        obs = torch.from_numpy(np.expand_dims(self.x.loc[idx].values, 1))
+        # get only last value of the last num_future
+        truth = torch.from_numpy(np.expand_dims(self.y.loc[idx].values, 1))
+        # valori dei timestamp, originariamente servivano indici, magari funziona lo stesso
+        time_points = torch.from_numpy(self.time.loc[idx].values)
+        # forse struttura interna necessaria per il modello
+        obs_valid = torch.ones_like(time_points, dtype=torch.bool)
+
+        return torch.nan_to_num(obs), torch.nan_to_num(truth), torch.nan_to_num(time_points), obs_valid
+
+
+class USHCNForecast(Dataset):
+
+    def __init__(self, file_path, name, num_past, num_future, discard_window_threshold: float = 0.5, impute_rate=None,
+                 sample_rate=0.5, columns=(0, 1, 2, 3, 4, 5, 6, 7),
+                 unobserved_rate=None, year_range=4):
+        self.params = ['PRCP', 'SNOW', 'SNWD', 'TMAX', 'TMIN', 'LONGITUDE', 'LATITUDE', 'ELEVATION']
+        self.sample_rate = sample_rate
+        self.impute_rate = impute_rate
+        self.unobserved_rate = unobserved_rate
+        self.year_range = year_range
+        self.data = pd.read_csv(file_path + name).sort_values(['UNIQUE_ID', 'TIME_STAMP']).set_index('UNIQUE_ID')
+        self.label_columns = self.data.columns[self.data.columns.isin([str(i) for i in columns])]
+        self.num_past = num_past
+        self.num_future = num_future
+        self.window_size = self.num_past + self.num_future  # x, y
+        self.discard_window_threshold = discard_window_threshold
+        self.features = ['0', '1', '2', '3', '4', 'TIME_STAMP']
+        self.numeric_features = ['0', '1', '2', '3', '4']
+        self.num_features = len(self.features)
+        self.num_numeric_features = len(self.numeric_features)
+        self.past_features = self.num_past * self.num_features
+        self.future_features = self.num_future * self.num_features
+        self.set_ = 'train' if 'train' in name else 'test'
+        self.save_file = os.path.join(file_path, f'{self.set_}_windows.npy')
+        if os.path.exists(self.save_file):
+            self.data_windows = np.load(self.save_file, allow_pickle=True)
+        else:
+            self.data_windows = self.generate_windows()
+            np.save(self.save_file, self.data_windows)
+
+    def parallel_generate_windows(self, data_df, station_id):
+        tmp_window = list()
+        data_windows = {station_id: list()}
+
+        for _, row in data_df.iterrows():
+            tmp_window.append(row[self.features].values)
+
+            if len(tmp_window) == self.window_size:
+                # get last num_future lists of values, but consider only the numeric features (not time)
+                future_data = tmp_window[-self.num_future:]
+                prcp_data = [future[0] for future in future_data]
+                # check there are less than 50% NaNs in the future values, else scrap the window
+                # sum nans for each array, then compute the total sum of the window,
+                # divided by the total number of features in the window (5 per array)
+                if pd.isna(prcp_data).sum(axis=0) / self.num_future < self.discard_window_threshold:
+                    data_windows[station_id].append(tmp_window.copy())
+                    # remove window with most NaNs
+                    # most_empty_data_idx = np.argmax([pd.isna(future).sum(axis=0) for future in future_data])
+                    # neg_idx_in_window = -(self.num_future - most_empty_data_idx)
+
+                tmp_window.pop(0)  # more efficient than slicing tmp_window[1:]
+
+        return data_windows
+
+    def generate_windows(self):
+        data_windows = dict()
+
+        stations_ids = self.data.index.unique()
+
+        for station_id in stations_ids:
+            data_windows[station_id] = list()
+
+        with futures.ProcessPoolExecutor() as executor:
+            futures_ = list()
+            for station_id in stations_ids:
+                kwargs = {
+                    'data_df': self.data.loc[station_id],
+                    'station_id': station_id
+                }
+
+                futures_.append(executor.submit(self.parallel_generate_windows, **kwargs))
+            done, not_done = futures.wait(futures_, return_when=futures.FIRST_EXCEPTION)
+
+            futures_exceptions = [future.exception() for future in done]
+            failed_futures = sum(map(lambda exception_: True if exception_ is not None else False,
+                                     futures_exceptions))
+
+            if failed_futures > 0:
+                print("Could not create all time windows. Thrown exceptions: ")
+
+                for exception in futures_exceptions:
+                    print(exception)
+
+                raise RuntimeError(f"Could not created windows, {failed_futures} processes failed.")
+
+            if failed_futures == 0:
+                print("Time windows created successfully.")
+
+                # merge all the dictionaries
+                data_windows = {key: value for future_ in done for key, value in future_.result().items()}
+
+        print("Concatenating data...")
+        # np.array(list(shared_data_windows.items()), dtype=np.float64, ndmin=4)
+        # maybe np.concatenate?
+        # data_windows = np.stack([np.array(data_window, dtype=np.float64) for data_window in data_windows.values()])
+        data_windows = np.concatenate(
+            [np.array(data_window, dtype=np.float64) for data_window in data_windows.values()])
+
+        return data_windows
+
+    def __len__(self):
+        return len(self.data_windows)
+
+    def __getitem__(self, idx):
+        data_window = self.data_windows[idx]
+        obs = torch.from_numpy(data_window[:self.num_past, :self.num_numeric_features])
+        # obs = torch.from_numpy(data_window[:self.num_past, :3])
+        # 0 on y-axis to forecast precipitations (PRCP)
+        truth = torch.from_numpy(np.array([[data_window[-self.num_future:-1, 0].sum()]]))
+        # valori dei timestamp, originariamente servivano indici, magari funziona lo stesso
+        time_points = torch.from_numpy(data_window[:self.num_past, -1])
+        # forse struttura interna necessaria per il modello
+        obs_valid = torch.ones_like(time_points, dtype=torch.bool)
+
+        return torch.nan_to_num(obs), torch.nan_to_num(truth), torch.nan_to_num(time_points), obs_valid
+
+
+class FrenchPiezo(Dataset):
+
+    def __init__(self, file_path, name, num_past, num_future, impute_rate=None,
+                 sample_rate=0.5, columns=('p', 'e', 'tp'),
+                 unobserved_rate=None):
+        self.params = list(columns) + ['unique_id', 'time']
+        self.sample_rate = sample_rate
+        self.impute_rate = impute_rate
+        self.unobserved_rate = unobserved_rate
+        # sorting index (bss) and then time values
+        self.data = pd.read_csv(file_path + name, low_memory=False).sort_values(by=['unique_id', 'time']).set_index('unique_id')
+        self.label_columns = self.data.columns[self.data.columns.isin([str(i) for i in self.params])]
+        self.num_past = num_past
+        self.num_future = num_future
+        self.window_size = self.num_past + self.num_future  # x, y
+        self.features = ['p', 'e', 'tp', 'time']
+        self.numeric_features = ['p', 'e', 'tp']
+        self.num_features = len(self.features)
+        self.num_numeric_features = len(self.numeric_features)
+        self.past_features = self.num_past * self.num_features
+        self.future_features = self.num_future * self.num_features
+        self.set_ = 'train' if 'train' in name else 'test'
+        self.save_file = os.path.join(file_path, f'{self.set_}_windows.npy')
+        if os.path.exists(self.save_file):
+            self.data_windows = np.load(self.save_file, allow_pickle=True)
+        else:
+            self.data_windows = self.generate_windows()
+            np.save(self.save_file, self.data_windows)
+
+    def parallel_generate_windows(self, data_df, station_id):
+        tmp_window = list()
+        data_windows = {station_id: list()}
+
+        for _, row in data_df.iterrows():
+            tmp_window.append(row[self.features].values)
+
+            if len(tmp_window) == self.window_size:
+                # get last num_future lists of values, but consider only the numeric features (not time)
+                future_data = tmp_window[-self.num_future:]
+                last_future_p = future_data[-1][0]
+                # check there are less than 50% NaNs in the future values, else scrap the window
+                # sum nans for each array, then compute the total sum of the window,
+                # divided by the total number of features in the window (5 per array)
+                if not pd.isna(last_future_p):
+                    data_windows[station_id].append(tmp_window.copy())
+                    # remove window with most NaNs
+                    # most_empty_data_idx = np.argmax([pd.isna(future).sum(axis=0) for future in future_data])
+                    # neg_idx_in_window = -(self.num_future - most_empty_data_idx)
+
+                tmp_window.pop(0)  # more efficient than slicing tmp_window[1:]
+
+        return data_windows
+
+    def generate_windows(self):
+        data_windows = dict()
+
+        sensors_ids = self.data.index.unique()
+
+        for sensor_id in sensors_ids:
+            data_windows[sensor_id] = list()
+
+        with futures.ProcessPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
+            futures_ = list()
+            for sensor_id in sensors_ids:
+                kwargs = {
+                    'data_df': self.data.loc[sensor_id],
+                    'station_id': sensor_id
+                }
+
+                futures_.append(executor.submit(self.parallel_generate_windows, **kwargs))
+            done, not_done = futures.wait(futures_, return_when=futures.FIRST_EXCEPTION)
+
+            futures_exceptions = [future.exception() for future in done]
+            failed_futures = sum(map(lambda exception_: True if exception_ is not None else False,
+                                     futures_exceptions))
+
+            if failed_futures > 0:
+                print("Could not create all time windows. Thrown exceptions: ")
+
+                for exception in futures_exceptions:
+                    print(exception)
+
+                raise RuntimeError(f"Could not created windows, {failed_futures} processes failed.")
+
+            if failed_futures == 0:
+                print("Time windows created successfully.")
+
+                # merge all the dictionaries
+                data_windows = {key: value for future_ in done for key, value in future_.result().items()}
+
+        print("Concatenating data...")
+        # np.array(list(shared_data_windows.items()), dtype=np.float64, ndmin=4)
+        # maybe np.concatenate?
+        # data_windows = np.stack([np.array(data_window, dtype=np.float64) for data_window in data_windows.values()])
+        np_data_windows = [np.array(data_window, dtype=np.float64) for data_window in data_windows.values()
+                           if data_window]
+        data_windows = np.concatenate(np_data_windows)
+
+        return data_windows
+
+    def __len__(self):
+        return len(self.data_windows)
+
+    def __getitem__(self, idx):
+        data_window = self.data_windows[idx]
+        obs = torch.from_numpy(data_window[:self.num_past, :self.num_numeric_features])
+        # get only last value of the last num_future
+        truth = torch.from_numpy(np.array([[data_window[-1, 0]]]))
+        # valori dei timestamp, originariamente servivano indici, magari funziona lo stesso
+        time_points = torch.from_numpy(data_window[:self.num_past, -1])
+        # forse struttura interna necessaria per il modello
+        obs_valid = torch.ones_like(time_points, dtype=torch.bool)
+
+        return torch.nan_to_num(obs), torch.nan_to_num(truth), torch.nan_to_num(time_points), obs_valid
+
+
+# new code component
+class USHCN(Dataset):
     params = ['PRCP', 'SNOW', 'SNWD', 'TMAX', 'TMIN']
 
-    def __init__(self, file_path, name, impute_rate=None, sample_rate=0.5, columns=[0, 1, 2, 3, 4], unobserved_rate=None, year_range=4):
+    def __init__(self, file_path, name, impute_rate=None, sample_rate=0.5, columns=[0, 1, 2, 3, 4],
+                 unobserved_rate=None, year_range=4):
         self.sample_rate = sample_rate
         self.impute_rate = impute_rate
         self.unobserved_rate = unobserved_rate
@@ -175,7 +500,7 @@ class USHCN(Dataset):
         rng = np.random.RandomState(seed)
 
         choice = np.sort(rng.choice(n_total_time_points,
-                         n_sample_time_points, replace=False))
+                                    n_sample_time_points, replace=False))
         return sample.loc[choice]
 
     def subsample_features(self, n_features, n_sample_time_points, seed=0):
@@ -195,7 +520,7 @@ class USHCN(Dataset):
         elif isinstance(self.unobserved_rate, float) or isinstance(self.unobserved_rate, int):
             assert 0 <= self.unobserved_rate < 1, 'Unobserved rate must be between 0 and 1.'
             unobserved_mask = ~ (
-                rng.rand(n_sample_time_points, n_features) > self.unobserved_rate)
+                    rng.rand(n_sample_time_points, n_features) > self.unobserved_rate)
 
         else:
             raise Exception('Unobserved mode unknown')
@@ -228,7 +553,7 @@ class USHCN(Dataset):
             raise Exception('Impute mode unknown')
 
         time_points = torch.tensor(sample.loc[:, 'TIME_STAMP'].values)
-        mask_targets = 1*~targets.isnan()
+        mask_targets = 1 * ~targets.isnan()
         mask_obs = ~ unobserved_mask
 
         return torch.nan_to_num(obs), torch.nan_to_num(targets), obs_valid, time_points, mask_targets, mask_obs
@@ -270,10 +595,9 @@ class Physionet(Dataset):
 
 # new code component 
 def collate_fn_physionet(batch):
-
     obs = [obs for patient_id, time_points, obs, mask, label in batch]
     time_points = [time_points for patient_id,
-                   time_points, obs, mask, label in batch]
+    time_points, obs, mask, label in batch]
     mask = [mask for patient_id, time_points, obs, mask, label in batch]
 
     obs = pad_sequence(obs, batch_first=True).to(
@@ -297,7 +621,7 @@ def subsample(data, sample_rate, imagepred=False, random_state=0):
     seq_length = train_obs.shape[1]
     train_time_points = []
     test_time_points = []
-    n = int(sample_rate*seq_length)
+    n = int(sample_rate * seq_length)
 
     if imagepred:
         train_obs_valid = data["train_obs_valid"]
@@ -311,7 +635,7 @@ def subsample(data, sample_rate, imagepred=False, random_state=0):
             np.zeros_like(x[:, :n, ...]) for x in data_components]
 
     for i in range(train_obs.shape[0]):
-        rng_train = np.random.default_rng(random_state+i+train_obs.shape[0])
+        rng_train = np.random.default_rng(random_state + i + train_obs.shape[0])
         choice = np.sort(rng_train.choice(seq_length, n, replace=False))
         train_time_points.append(choice)
         train_obs_sub[i, ...], train_targets_sub[i, ...] = [
@@ -320,7 +644,7 @@ def subsample(data, sample_rate, imagepred=False, random_state=0):
             train_obs_valid_sub[i, ...] = train_obs_valid[i, choice, ...]
 
     for i in range(test_obs.shape[0]):
-        rng_test = np.random.default_rng(random_state+i)
+        rng_test = np.random.default_rng(random_state + i)
         choice = np.sort(rng_test.choice(seq_length, n, replace=False))
         test_time_points.append(choice)
         test_obs_sub[i, ...], test_targets_sub[i, ...] = [
@@ -337,8 +661,7 @@ def subsample(data, sample_rate, imagepred=False, random_state=0):
         return train_obs_sub, train_targets_sub, test_obs_sub, test_targets_sub, train_time_points, test_time_points
 
 
-
-# new code component 
+# new code component
 def find_nearest(array, value):
     array = np.asarray(array)
     idx = (np.abs(array - value)).argmin()
@@ -349,7 +672,7 @@ def find_nearest(array, value):
 def discretize_data(obs, targets, time_points, obs_valid, n_bins=10, take_always_closest=True):
     N = obs.shape[0]
     T_max = time_points.max()
-    bin_length = T_max/n_bins
+    bin_length = T_max / n_bins
     obs_valid = np.squeeze(obs_valid)
 
     # define the bins
@@ -357,7 +680,7 @@ def discretize_data(obs, targets, time_points, obs_valid, n_bins=10, take_always
 
     # get the center of each bin
     bin_length = bin_edges[1] - bin_edges[0]
-    bin_center = bin_edges + bin_length/2
+    bin_center = bin_edges + bin_length / 2
 
     # get the timepoint, obs etc that is closest to the bin center
     tp_all = []
@@ -371,7 +694,7 @@ def discretize_data(obs, targets, time_points, obs_valid, n_bins=10, take_always
             sample_tp = time_points[i, :]
             center = bin_center[j]
             idx = find_nearest(sample_tp, center)
-            if (bin_edges[j] <= sample_tp[idx] <= bin_edges[j+1]) or take_always_closest:
+            if (bin_edges[j] <= sample_tp[idx] <= bin_edges[j + 1]) or take_always_closest:
                 tp_list.append(sample_tp[idx])
                 obs_valid_list.append(obs_valid[i, idx])
                 obs_all[i, j, ...] = obs[i, idx, ...]

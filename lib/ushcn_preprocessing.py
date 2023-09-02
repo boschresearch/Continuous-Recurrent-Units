@@ -18,94 +18,160 @@
 # licensed under MIT License
 # cf. 3rd-party-licenses.txt file in the root directory of this source tree.
 
-from concurrent.futures import process
+import multiprocessing
+import platform
+
 import pandas as pd
 from itertools import chain
 import numpy as np
 import os
 import gzip
 from torchvision.datasets.utils import download_url
+from concurrent import futures
+
 
 # new code component
 def download_ushcn(data_path):
     os.makedirs(data_path, exist_ok=True)
     url = 'https://cdiac.ess-dive.lbl.gov/ftp/ushcn_daily/'
     daily_state_files = [
-            'state01_AL.txt.gz',	 
-            'state02_AZ.txt.gz',	 
-            'state03_AR.txt.gz',	 
-            'state04_CA.txt.gz',	 
-            'state05_CO.txt.gz',	 
-            'state06_CT.txt.gz',	 
-            'state07_DE.txt.gz',	 
-            'state08_FL.txt.gz',	 
-            'state09_GA.txt.gz',	 
-            'state10_ID.txt.gz',	 
-            'state11_IL.txt.gz',	 
-            'state12_IN.txt.gz',	 
-            'state13_IA.txt.gz',	 
-            'state14_KS.txt.gz',	 
-            'state15_KY.txt.gz',	 
-            'state16_LA.txt.gz',	 
-            'state17_ME.txt.gz',	 
-            'state18_MD.txt.gz',	 
-            'state19_MA.txt.gz',	 
-            'state20_MI.txt.gz',	 
-            'state21_MN.txt.gz',	 
-            'state22_MS.txt.gz',	 
-            'state23_MO.txt.gz',	 
-            'state24_MT.txt.gz',	 
-            'state25_NE.txt.gz',	 
-            'state26_NV.txt.gz',	 
-            'state27_NH.txt.gz',	 
-            'state28_NJ.txt.gz',	 
-            'state29_NM.txt.gz',	 
-            'state30_NY.txt.gz',	 
-            'state31_NC.txt.gz',	 
-            'state32_ND.txt.gz',	 
-            'state33_OH.txt.gz',	 
-            'state34_OK.txt.gz',	 
-            'state35_OR.txt.gz',	 
-            'state36_PA.txt.gz',	 
-            'state37_RI.txt.gz',	 
-            'state38_SC.txt.gz',	 
-            'state39_SD.txt.gz',	 
-            'state40_TN.txt.gz',	 
-            'state41_TX.txt.gz',	 
-            'state42_UT.txt.gz',	 
-            'state43_VT.txt.gz',	 
-            'state44_VA.txt.gz',	 
-            'state45_WA.txt.gz',	 
-            'state46_WV.txt.gz',	 
-            'state47_WI.txt.gz',	 
-            'state48_WY.txt.gz'
-            ]
-    for state_file in daily_state_files:
-        state_url = url + state_file
-        download_url(state_url, data_path, state_file, None)
+        'state01_AL.txt.gz',
+        'state02_AZ.txt.gz',
+        'state03_AR.txt.gz',
+        'state04_CA.txt.gz',
+        'state05_CO.txt.gz',
+        'state06_CT.txt.gz',
+        'state07_DE.txt.gz',
+        'state08_FL.txt.gz',
+        'state09_GA.txt.gz',
+        'state10_ID.txt.gz',
+        'state11_IL.txt.gz',
+        'state12_IN.txt.gz',
+        'state13_IA.txt.gz',
+        'state14_KS.txt.gz',
+        'state15_KY.txt.gz',
+        'state16_LA.txt.gz',
+        'state17_ME.txt.gz',
+        'state18_MD.txt.gz',
+        'state19_MA.txt.gz',
+        'state20_MI.txt.gz',
+        'state21_MN.txt.gz',
+        'state22_MS.txt.gz',
+        'state23_MO.txt.gz',
+        'state24_MT.txt.gz',
+        'state25_NE.txt.gz',
+        'state26_NV.txt.gz',
+        'state27_NH.txt.gz',
+        'state28_NJ.txt.gz',
+        'state29_NM.txt.gz',
+        'state30_NY.txt.gz',
+        'state31_NC.txt.gz',
+        'state32_ND.txt.gz',
+        'state33_OH.txt.gz',
+        'state34_OK.txt.gz',
+        'state35_OR.txt.gz',
+        'state36_PA.txt.gz',
+        'state37_RI.txt.gz',
+        'state38_SC.txt.gz',
+        'state39_SD.txt.gz',
+        'state40_TN.txt.gz',
+        'state41_TX.txt.gz',
+        'state42_UT.txt.gz',
+        'state43_VT.txt.gz',
+        'state44_VA.txt.gz',
+        'state45_WA.txt.gz',
+        'state46_WV.txt.gz',
+        'state47_WI.txt.gz',
+        'state48_WY.txt.gz'
+    ]
+    urls = [(url + state_file, state_file) for state_file in daily_state_files]
+    # using the 'spawn' context with ProcessPoolExecutor on Windows causes pickling errors,
+    # but it is the only available method. It is necessary to make the code sequential, as threads are
+    # bound by the GIL and execute sequentially anyway.
+    if platform.system() == 'Windows':
+        for url, state_file in urls:
+            download_url(url, data_path, filename=state_file)
+
+    else:  # Linux uses 'fork' as starting method, and it doesn't give any problem.
+        with futures.ProcessPoolExecutor() as executor:
+            futures_ = [executor.submit(download_url, *[url, data_path],
+                                        **{'filename': filename, 'md5': None}) for url, filename in urls]
+            done, not_done = futures.wait(futures_, return_when=futures.ALL_COMPLETED)
+
+            futures_exceptions = [future.exception() for future in done]
+            failed_futures = sum(map(lambda exception_: True if exception_ is not None else False, futures_exceptions))
+
+            if failed_futures > 0:
+                print("Could not download all files. Thrown exceptions: ")
+
+                for exception in futures_exceptions:
+                    print(exception)
+
+                raise RuntimeError(f"Could not download {failed_futures} files.")
+
+            if failed_futures == 0:
+                print("All files downloaded.")
+
+
+def download_stations_spatial_data(data_path):
+    import urllib.request
+    filename = 'ushcn-v2.5-stations.txt'
+    url = 'ftp://ftp.ncdc.noaa.gov:21/pub/data/ushcn/v2.5/' + filename
+    urllib.request.urlretrieve(url, os.path.join(data_path, filename))
+    print("Stations spatial data downloaded.")
+
+
+def parse_stations_spatial_data(input_dir, output_dir):
+    stations_file = os.path.join(input_dir, 'ushcn-v2.5-stations.txt')
+    stations_data_df = pd.DataFrame(columns=['COOP_ID', 'ELEMENT', 'VALUE'])
+    with open(stations_file, 'r') as file:
+        for line in file:
+            data_dict = dict()
+            data_dict['COOP_ID'] = [line[5:11]]
+            spatial_data_dict = {
+                'LATITUDE': [float(line[12:20])],
+                'LONGITUDE': [float(line[21:30])],
+                'ELEVATION': float(line[32:37])
+            }
+
+            elevation = spatial_data_dict['ELEVATION']
+            if elevation == -999.9:
+                spatial_data_dict['ELEVATION'] = [np.nan]
+            else:
+                spatial_data_dict['ELEVATION'] = [elevation]
+
+            for element, value in spatial_data_dict.items():
+                data_dict['ELEMENT'] = element
+                data_dict['VALUE'] = value
+                stations_data_df = pd.concat([stations_data_df, pd.DataFrame.from_dict(data_dict)], ignore_index=True)
+
+    stations_data_df.to_csv(os.path.join(output_dir, 'ushcn-v2.5-stations.csv'), index=False)
+    print("Stations spatial data parsed.")
 
 
 # taken from https://github.com/edebrouwer/gru_ode_bayes and modified
 def to_pandas(state_dir, target_dir):
-    name = state_dir[:-4]+'.csv'
+    name = state_dir[:-3] + '.csv'
     output_file = os.path.join(target_dir, name)
 
     if not os.path.exists(output_file):
+        print(f'Computing State : {state_dir}')
         sep_list = [0, 6, 10, 12, 16]
         for day in range(31):
-            sep_list = sep_list + [21+day*8, 22+day*8, 23+day*8, 24+day*8]
+            sep_list = sep_list + [21 + day * 8, 22 + day * 8, 23 + day * 8, 24 + day * 8]
 
         columns = ['COOP_ID', 'YEAR', 'MONTH', 'ELEMENT']
-        values_list = list(chain.from_iterable(("VALUE-"+str(i+1), "MFLAG-" +
-                        str(i+1), "QFLAG-"+str(i+1), "SFLAG-"+str(i+1)) for i in range(31)))
+        values_list = list(chain.from_iterable(("VALUE-" + str(i + 1), "MFLAG-" +
+                                                str(i + 1), "QFLAG-" + str(i + 1), "SFLAG-" + str(i + 1)) for i in
+                                               range(31)))
         columns += values_list
 
         df_list = []
         with gzip.open(os.path.join(target_dir, state_dir), 'rt') as f:
             for line in f:
                 line = line.strip()
-                nl = [line[sep_list[i]:sep_list[i+1]]
-                    for i in range(len(sep_list)-1)]
+                nl = [line[sep_list[i]:sep_list[i + 1]]
+                      for i in range(len(sep_list) - 1)]
                 df_list.append(nl)
 
         df = pd.DataFrame(df_list, columns=columns)
@@ -120,30 +186,54 @@ def to_pandas(state_dir, target_dir):
         df_m[["TYPE", "DAY"]] = df_m.variable.str.split(pat="-", expand=True)
 
         df_n = df_m[["COOP_ID", "YEAR", "MONTH",
-                    "DAY", "ELEMENT", "TYPE", "value"]].copy()
+                     "DAY", "ELEMENT", "TYPE", "value"]].copy()
 
         df_p = df_n.pivot_table(values='value', index=[
-                                "COOP_ID", "YEAR", "MONTH", "DAY", "ELEMENT"], columns="TYPE", aggfunc="first")
+            "COOP_ID", "YEAR", "MONTH", "DAY", "ELEMENT"], columns="TYPE", aggfunc="first")
         df_p.reset_index(inplace=True)
 
         df_q = df_p[["COOP_ID", "YEAR", "MONTH", "DAY",
-                    "ELEMENT", "MFLAG", "QFLAG", "SFLAG", "VALUE"]]
+                     "ELEMENT", "MFLAG", "QFLAG", "SFLAG", "VALUE"]]
 
         df_q.to_csv(output_file, index=False)
-        # Number of non missing
-        #meas_tot = df.shape[0]*31
-        #na_meas = df[val_cols].isna().sum().sum()
+        # Number of non-missing
+        # meas_tot = df.shape[0]*31
+        # na_meas = df[val_cols].isna().sum().sum()
+    else:
+        print(f'Found already computed file: {state_dir}')
 
 
 # taken from https://github.com/edebrouwer/gru_ode_bayes and not modified
 def convert_all_to_pandas(input_dir, output_dir):
-    list_dir = os.listdir(input_dir)
-    txt_list_dir = [s for s in list_dir if ".txt" in s]
-    state_list_dir = [s for s in txt_list_dir if "state" in s]
+    state_list_dir = [file for file in os.listdir(input_dir) if "state" in file and file.endswith('.txt.gz')]
+    available_cores = multiprocessing.cpu_count()
+    max_workers = 8 if available_cores >= 8 else available_cores
 
-    for state_dir in state_list_dir:
-        print(f'Computing State : {state_dir}')
-        to_pandas(state_dir, output_dir)
+    with futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        futures_ = [executor.submit(to_pandas, *[state_dir, output_dir]) for state_dir in state_list_dir]
+
+        done, not_done = futures.wait(futures_, return_when=futures.ALL_COMPLETED)
+
+        futures_exceptions = [future.exception() for future in done]
+        failed_futures = sum(map(lambda exception_: True if exception_ is not None else False, futures_exceptions))
+
+        if failed_futures > 0:
+            print("Could not convert all files to CSV. Thrown exceptions: ")
+
+            for exception in futures_exceptions:
+                print(exception)
+
+            raise RuntimeError(f"Could not convert {failed_futures} files to CSV format.")
+
+        if failed_futures == 0:
+            print("All files converted.")
+
+
+def load_and_concatenate(input_file, output_file, header, lock):
+    print(f"Loading dataframe for keyword : {input_file.split('/')[-1][:-4]}")
+    df_temp = pd.read_csv(input_file, low_memory=False)
+    with lock:
+        df_temp.to_csv(output_file, mode='a', index=False, header=header)
 
 
 # taken from https://github.com/edebrouwer/gru_ode_bayes and modified
@@ -151,22 +241,39 @@ def merge_dfs(input_dir, output_dir, keyword):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     output_file = os.path.join(output_dir, "daily_merged.csv")
+
     if not os.path.exists(output_file):
+        open(output_file, 'w').close()  # create the file with size 0
         df_list = os.listdir(input_dir)
         csv_list = [s for s in df_list if '.csv' in s]
         keyword_csv_list = [s for s in csv_list if keyword in s]
+        input_files = [os.path.join(input_dir, keyword_csv) for keyword_csv in keyword_csv_list]
 
-        df_list = []
-        for keyword_csv in keyword_csv_list:
-            print(f"Loading dataframe for keyword : {keyword_csv[:-4]}")
-            df_temp = pd.read_csv(os.path.join(input_dir, keyword_csv), low_memory=False)
-            #df_temp.insert(0, "UNIQUE_ID", keyword_csv[-7:-4])
-            df_list.append(df_temp)
-        print("All dataframes are loaded")
-        # Merge all datasets:
-        print("Concat all ...")
-        df = pd.concat(df_list)
-        df.to_csv(output_file)
+        with multiprocessing.Manager() as manager:
+            lock = manager.Lock()
+
+            load_and_concatenate(input_files[0], output_file, True, lock)
+
+            with futures.ProcessPoolExecutor(max_workers=2) as executor:
+                futures_ = [executor.submit(load_and_concatenate, *[input_file, output_file, False, lock])
+                            for input_file in input_files[1:]]
+
+            done, not_done = futures.wait(futures_, return_when=futures.FIRST_EXCEPTION)
+
+            futures_exceptions = [future.exception() for future in done]
+            failed_futures = sum(
+                map(lambda exception_: True if exception_ is not None else False, futures_exceptions))
+
+            if failed_futures > 0:
+                print("Could not join a CSV file. Thrown exception: ")
+
+                for exception in futures_exceptions:
+                    print(exception)
+
+                raise RuntimeError(f"Could not join a file in daily_merged.csv.")
+
+            if failed_futures == 0:
+                print("All files saved in one dataframe as daily_merged.csv.")
 
 
 # taken from https://github.com/edebrouwer/gru_ode_bayes and modified
@@ -182,7 +289,7 @@ def clean(input_dir, output_dir):
 
         # Remove values with bad quality flag.
         qflags = ["D", "G", "I", "K", "L", "M",
-                "N", "O", "R", "S", "T", "W", "X", "Z"]
+                  "N", "O", "R", "S", "T", "W", "X", "Z"]
         df.drop(df.loc[df.QFLAG.isin(qflags)].index, inplace=True)
         print(f"Removed bad quality flags. Number of observations {df.shape[0]}")
 
@@ -202,23 +309,24 @@ def clean(input_dir, output_dir):
 
         print(f"Number of kept centers : {df.COOP_ID.nunique()}")
         print(
-            f"Number of observations / center : {df.shape[0]/df.COOP_ID.nunique()}")
-        print(f"Number of days : {50*365}")
+            f"Number of observations / center : {df.shape[0] / df.COOP_ID.nunique()}")
+        print(f"Number of days : {50 * 365}")
 
         # Create a unique_index
         unique_map = dict(zip(list(df.COOP_ID.unique()),
-                        np.arange(df.COOP_ID.nunique())))
+                              np.arange(df.COOP_ID.nunique())))
         label_map = dict(zip(list(df.ELEMENT.unique()),
-                        np.arange(df.ELEMENT.nunique())))
+                             np.arange(df.ELEMENT.nunique())))
 
         df.insert(0, "UNIQUE_ID", df.COOP_ID.map(unique_map))
         df.insert(1, "LABEL", df.ELEMENT.map(label_map))
 
+        print(df[['LABEL', 'ELEMENT']].sort_values(by='LABEL').drop_duplicates())
         # Create a time_index.
         import datetime
         df["DATE"] = pd.to_datetime(
-            (df.YEAR*10000+df.MONTH*100+df.DAY).apply(str), format='%Y%m%d')
-        df["DAYS_FROM_1950"] = (df.DATE-datetime.datetime(1950, 1, 1)).dt.days
+            (df.YEAR * 10000 + df.MONTH * 100 + df.DAY).apply(str), format='%Y%m%d')
+        df["DAYS_FROM_1950"] = (df.DATE - datetime.datetime(1950, 1, 1)).dt.days
 
         # GENERATE TIME STAMP !!
         df["TIME_STAMP"] = df.DAYS_FROM_1950
@@ -234,26 +342,47 @@ def train_test_valid_split(input_dir, output_dir, test=0.2, valid=0.2, seed=42):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     rng1 = np.random.default_rng(seed)
-    rng2 = np.random.default_rng(seed+1)
+    rng2 = np.random.default_rng(seed + 1)
     df = pd.read_csv(os.path.join(input_dir, 'cleaned_df.csv'))
     idx = df.UNIQUE_ID.unique()
+    stations_data_file = os.path.join(input_dir, "ushcn-v2.5-stations.csv")
+    columns_to_convert = ['UNIQUE_ID', 'LABEL', 'YEAR', 'MONTH', 'DAY', 'DAYS_FROM_1950', 'TIME_STAMP']
+    label_map = dict(zip(list(df.ELEMENT.unique()),
+                         np.arange(df.ELEMENT.nunique())))
+    unique_map = dict(zip(list(df.COOP_ID.unique()),
+                          np.arange(df.COOP_ID.nunique())))
 
     test_idx = rng1.choice(idx, int(len(idx) * test), replace=False)
     train_valid_idx = [i for i in idx if i not in test_idx]
-    valid_idx = rng2.choice(train_valid_idx, int(len(idx)*valid), replace=False)
+    valid_idx = rng2.choice(train_valid_idx, int(len(idx) * valid), replace=False)
     train_idx = [i for i in train_valid_idx if i not in valid_idx]
 
     test_set = df.loc[df.UNIQUE_ID.isin(test_idx), :]
     train_valid_set = df.loc[df.UNIQUE_ID.isin(train_valid_idx), :]
     valid_set = df.loc[df.UNIQUE_ID.isin(valid_idx), :]
     train_set = df.loc[df.UNIQUE_ID.isin(train_idx), :]
-    print(f'test: {test_set.UNIQUE_ID.nunique()} \nvalid: {valid_set.UNIQUE_ID.nunique()} \ntrain: {train_set.UNIQUE_ID.nunique()}')
+    print(
+        f'test: {test_set.UNIQUE_ID.nunique()} \n'
+        f'valid: {valid_set.UNIQUE_ID.nunique()} \n'
+        f'train: {train_set.UNIQUE_ID.nunique()}')
 
-    test_set.to_csv(os.path.join(output_dir, 'cleaned_test.csv'))
-    train_valid_set.to_csv(os.path.join(
-        output_dir, 'cleaned_train_valid.csv'))
-    valid_set.to_csv(os.path.join(output_dir, 'cleaned_valid.csv'))
-    train_set.to_csv(os.path.join(output_dir, 'cleaned_train.csv'))
+    # Add spatial information
+    spatial_data_df = pd.read_csv(stations_data_file, low_memory=False)
+
+    for set_df in [test_set, train_valid_set, valid_set, train_set]:
+        set_spatial_data_df = spatial_data_df[spatial_data_df.COOP_ID.isin(set_df.COOP_ID.unique())]
+        set_df = pd.concat([set_df, set_spatial_data_df])
+        set_df['LABEL'] = set_df['ELEMENT'].map(label_map)
+        set_df['UNIQUE_ID'] = set_df['COOP_ID'].map(unique_map)
+        set_df.sort_values(by=['UNIQUE_ID', 'YEAR'], na_position='first', ignore_index=True, inplace=True)
+        set_df.bfill(inplace=True)
+        set_df[columns_to_convert] = set_df[columns_to_convert].astype(int)
+        set_df.drop_duplicates(inplace=True)
+
+    test_set.to_csv(os.path.join(output_dir, 'cleaned_test.csv'), index=False)
+    train_valid_set.to_csv(os.path.join(output_dir, 'cleaned_train_valid.csv'), index=False)
+    valid_set.to_csv(os.path.join(output_dir, 'cleaned_valid.csv'), index=False)
+    train_set.to_csv(os.path.join(output_dir, 'cleaned_train.csv'), index=False)
 
 
 # new code component
@@ -265,7 +394,8 @@ def select_time_period(input_dir, input_name, output_dir, output_name, start_yea
 
 
 # new code component
-def cleaning_after_split(input_dir, name, output_dir, outlier_thr=4, scaling='standardize', min_time_points_per_center=None):
+def cleaning_after_split(input_dir, name, output_dir, outlier_thr=4, scaling='standardize',
+                         min_time_points_per_center=None):
     df = pd.read_csv(os.path.join(input_dir, name))
     df = df[['LABEL', 'COOP_ID', 'YEAR', 'VALUE', 'ELEMENT', 'TIME_STAMP']]
 
@@ -275,9 +405,10 @@ def cleaning_after_split(input_dir, name, output_dir, outlier_thr=4, scaling='st
         s_dev = df.loc[df.ELEMENT == label, "VALUE"].std()
         print(f'{label} before outliers are removed: mean {avg} std {s_dev}')
         df.loc[df.ELEMENT == label, "VALUE"] = np.where(abs(
-            df.loc[df.ELEMENT == label, "VALUE"] - avg) > outlier_thr*s_dev, np.nan, df.loc[df.ELEMENT == label, "VALUE"])
+            df.loc[df.ELEMENT == label, "VALUE"] - avg) > outlier_thr * s_dev, np.nan,
+                                                        df.loc[df.ELEMENT == label, "VALUE"])
         print(f'outliers removed for label {label}:', df[[
-              'VALUE']].isna().sum().item(), avg)
+            'VALUE']].isna().sum().item(), avg)
         df.dropna(axis=0, subset=['VALUE'], inplace=True)
 
         # scale data
@@ -287,7 +418,7 @@ def cleaning_after_split(input_dir, name, output_dir, outlier_thr=4, scaling='st
             df.loc[df.ELEMENT == label, "VALUE"] -= avg
             df.loc[df.ELEMENT == label, "VALUE"] /= s_dev
             print(
-                f'{label} after standardization: mean {df.loc[df.ELEMENT==label,"VALUE"].mean()} std {df.loc[df.ELEMENT==label,"VALUE"].std()}')
+                f'{label} after standardization: mean {df.loc[df.ELEMENT == label, "VALUE"].mean()} std {df.loc[df.ELEMENT == label, "VALUE"].std()}')
 
         elif scaling == 'normalize':
             label_min = df.loc[df.ELEMENT == label, "VALUE"].min()
@@ -297,14 +428,34 @@ def cleaning_after_split(input_dir, name, output_dir, outlier_thr=4, scaling='st
             df.loc[df.ELEMENT == label, "VALUE"] /= (label_max - label_min)
             print(f'min value {label_min}, max value {label_max}')
             print(
-                f'{label} after normalization: mean {df.loc[df.ELEMENT==label,"VALUE"].mean()} std {df.loc[df.ELEMENT==label,"VALUE"].std()}')
+                f'{label} after normalization: mean {df.loc[df.ELEMENT == label, "VALUE"].mean()} std {df.loc[df.ELEMENT == label, "VALUE"].std()}')
 
         else:
             raise Exception('Scaling method unknown')
 
+    # add spatial data (vi prego basta)
+    stations_data_file = os.path.join(input_dir, "ushcn-v2.5-stations.csv")
+    spatial_data_df = pd.read_csv(stations_data_file, low_memory=False)
+    columns_to_convert = ['UNIQUE_ID', 'LABEL', 'YEAR', 'TIME_STAMP']
+
+    set_spatial_data_df = spatial_data_df[spatial_data_df.COOP_ID.isin(df.COOP_ID.unique())]
+    set_df = pd.concat([df, set_spatial_data_df])
+    label_map = dict(zip(list(set_df.ELEMENT.unique()),
+                         np.arange(set_df.ELEMENT.nunique())))
+    unique_map = dict(zip(list(set_df.COOP_ID.unique()),
+                          np.arange(set_df.COOP_ID.nunique())))
+    set_df['LABEL'] = set_df['ELEMENT'].map(label_map)
+    set_df['UNIQUE_ID'] = set_df['COOP_ID'].map(unique_map)
+    set_df.sort_values(by=['UNIQUE_ID', 'YEAR'], na_position='first', ignore_index=True, inplace=True)
+    set_df.bfill(inplace=True)
+    set_df[columns_to_convert] = set_df[columns_to_convert].astype(int)
+    df = set_df.drop_duplicates()
+
     # adjust data format to pivot table
     pivot = df.pivot(index=['COOP_ID', 'TIME_STAMP'],
                      columns='LABEL', values='VALUE').reset_index()
+    # fill spatial data for each center
+    pivot[[5, 6, 7]] = pivot[[5, 6, 7]].ffill()
     pivot = pivot.sort_values(['COOP_ID', 'TIME_STAMP'])
 
     # drop centers that have too little observations (just a handfull)
@@ -318,7 +469,7 @@ def cleaning_after_split(input_dir, name, output_dir, outlier_thr=4, scaling='st
     # create new id
     print('mapping to unique id...')
     unique_map = dict(zip(list(pivot.COOP_ID.unique()),
-                      np.arange(pivot.COOP_ID.nunique())))
+                          np.arange(pivot.COOP_ID.nunique())))
     pivot.insert(0, "UNIQUE_ID", pivot.COOP_ID.map(unique_map))
     pivot.drop('COOP_ID', axis=1, inplace=True)
 
@@ -333,7 +484,7 @@ def cleaning_after_split(input_dir, name, output_dir, outlier_thr=4, scaling='st
 def download_and_process_ushcn(file_path):
     raw_path = os.path.join(file_path, 'raw')
     processed_path = os.path.join(file_path, 'processed')
-    #split_path = os.path.join(file_path, 'train_test_val_splits')
+    # split_path = os.path.join(file_path, 'train_test_val_splits')
     sets = ['train', 'train_valid', 'test', 'valid']
     start_year = 1990
     end_year = 1993
@@ -347,16 +498,18 @@ def download_and_process_ushcn(file_path):
     # reads the individual state .csv files and merges it to a single file named "daily_merged.csv"
     merge_dfs(input_dir=raw_path, output_dir=processed_path, keyword='state')
 
+    download_stations_spatial_data(raw_path)
+
+    parse_stations_spatial_data(raw_path, processed_path)
+
     # cleans daily_merged.csv
     clean(input_dir=processed_path, output_dir=processed_path)
 
     # splits data in disjoint train, valid and test sets and saves the union of train and valid set as train_valid
-    train_test_valid_split(
-        input_dir=processed_path, output_dir=processed_path)
+    train_test_valid_split(input_dir=processed_path, output_dir=processed_path)
 
-    for set in sets:
-        select_time_period(input_dir=processed_path, input_name=f'cleaned_{set}.csv',
-                        output_dir=processed_path, output_name=set, start_year=start_year, end_year=end_year)
-        cleaning_after_split(input_dir=processed_path, name=f'{set}_{start_year}_{end_year}.csv', 
-                        output_dir=file_path, scaling='normalize', min_time_points_per_center=730)
-
+    for set_ in sets:
+        select_time_period(input_dir=processed_path, input_name=f'cleaned_{set_}.csv',
+                           output_dir=processed_path, output_name=set_, start_year=start_year, end_year=end_year)
+        cleaning_after_split(input_dir=processed_path, name=f'{set_}_{start_year}_{end_year}.csv',
+                             output_dir=file_path, scaling='normalize', min_time_points_per_center=730)
